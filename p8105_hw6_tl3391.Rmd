@@ -1,0 +1,172 @@
+---
+title: "p8105_hw6_tl3391"
+author: "Tong Liu"
+date: "2025-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(p8105.datasets)
+library(tidyverse)
+library(modelr)
+library(broom)
+library(purrr)
+library(patchwork)
+
+knitr::opts_chunk$set(
+	echo = TRUE,
+	warning = FALSE,
+	fig.width = 8, 
+  fig.height = 6,
+  out.width = "90%"
+)
+```
+
+
+## Problem 1
+```{r}
+#import and clean the dataset
+homicide_df = 
+  read_csv("homicide-data.csv") |> 
+  mutate(
+    city_state = str_c(city, ", ", state),
+    resolved = as.numeric(disposition == "Closed by arrest"),
+    victim_age = as.numeric(victim_age)
+  ) |> 
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+    victim_race %in% c("White", "Black")
+  ) |> 
+  select(city_state, resolved, victim_age, victim_sex, victim_race)
+```
+```{r}
+# logistic regression for Baltimore
+baltimore_glm = 
+  homicide_df |> 
+  filter(city_state == "Baltimore, MD") |> 
+  glm(resolved ~ victim_age + victim_sex + victim_race, data = _, family = binomial())
+
+baltimore_glm |> 
+  broom::tidy() |> 
+  mutate(
+    OR = exp(estimate), 
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) |> 
+  filter(term == "victim_sexMale") |> 
+  select(OR, CI_lower, CI_upper) |> 
+  knitr::kable(digits = 3)
+```
+
+```{r}
+# All cities glm results
+model_results = 
+  homicide_df |> 
+  nest(data = -city_state) |> 
+  mutate(
+    models = map(data, \(df) glm(resolved ~ victim_age + victim_sex + victim_race, 
+                             family = binomial(), data = df)),
+    results = map(models, broom::tidy)
+  ) |> 
+  select(-data, -models) |> 
+  unnest(results) |> 
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) |> 
+  filter(term == "victim_sexMale") |> 
+  select(city_state, OR, CI_lower, CI_upper)
+
+model_results
+```
+
+```{r}
+#Plot for estimated ORs and CIs for each city
+model_results |> 
+  mutate(city_state = fct_reorder(city_state, OR)) |> 
+  ggplot(aes(x = city_state, y = OR)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper)) + 
+  coord_flip() +
+  labs(
+    title = "Odds Ratios for Solving Homicides",
+    x = "City",
+    y = "Estimated OR"
+  )
+```
+### Interpretation
+The analysis of homicide resolution rates across major U.S. cities reveals a consistent trend where crimes involving male victims are less likely to be solved than those involving female victims, holding age and race constant. The plotted odds ratios are predominantly below 1.0, and for many cities, the 95% confidence intervals do not include 1, confirming that this disparity is statistically significant in those locations. Although the magnitude of this effect varies by city—with some showing much wider confidence intervals due to smaller sample sizes—the overall pattern suggests a systemic difference in clearance rates based on the victim's sex.
+
+## Problem 2
+```{r}
+#import the dataset
+data("weather_df")
+weather_df = weather_df |> 
+  drop_na(tmax, tmin, prcp)
+
+```
+
+```{r}
+#bootstrap
+boot_results = 
+  weather_df |> 
+  modelr::bootstrap(n = 5000) |> 
+  mutate(
+    # Fit the linear model with TWO predictors
+    models = map(strap, \(df) lm(tmax ~ tmin + prcp, data = df)),
+    
+    # Extract R-squared using glance
+    r_squared = map_dbl(models, \(mod) broom::glance(mod)$r.squared),
+    
+    # Extract the beta coefficients and calculate the ratio (beta_tmin / beta_prcp)
+    beta_ratio = map_dbl(models, \(mod) {
+      coefs = broom::tidy(mod)
+      b_tmin = coefs$estimate[coefs$term == "tmin"]
+      b_prcp = coefs$estimate[coefs$term == "prcp"]
+      b_tmin / b_prcp
+    })
+  ) |> 
+  select(r_squared, beta_ratio)
+```
+
+```{r}
+p_r2 = 
+  boot_results |> 
+  ggplot(aes(x = r_squared)) + 
+  geom_density(fill = "red", alpha = 0.6) +
+  labs(
+    title = "Bootstrap Distribution of R-squared",
+    x = "R-squared",
+    y = "Density"
+  )
+
+p_ratio = 
+  boot_results |> 
+  ggplot(aes(x = beta_ratio)) + 
+  geom_density(fill = "blue", alpha = 0.6) +
+  labs(
+    title = "Bootstrap Distribution of Beta Ratio",
+    x = "Ratio (beta1 / beta2)",
+    y = "Density"
+  )
+p_r2 + p_ratio
+```
+The image displays two side-by-side density plots illustrating the bootstrap distributions for two distinct model statistics: the goodness-of-fit measure ($\hat{r}^2$) and the ratio of regression coefficients ($\hat{\beta}_1 / \hat{\beta}_2$). The left panel reveals that the distribution of $\hat{r}^2$ is extremely narrow and bell-shaped, centered firmly around 0.91, which indicates a precise and stable estimate of the model's explanatory power. In contrast, the right panel shows the distribution for the coefficient ratio, which is wider and more diffuse; this difference shows that the high variability and uncertainty associated with the ratio.
+```{r}
+ci_results = 
+  boot_results |> 
+  summarize(
+    r2_lower = quantile(r_squared, 0.025),
+    r2_upper = quantile(r_squared, 0.975),
+    ratio_lower = quantile(beta_ratio, 0.025, na.rm = TRUE),
+    ratio_upper = quantile(beta_ratio, 0.975, na.rm = TRUE)
+  )
+
+knitr::kable(ci_results, digits = 3, caption = "95% Confidence Intervals")
+```
+
+Using the 5000 bootstrap samples, the 95% confidence interval for $R^2$ is `r round(ci_results$r2_lower, 3)` to `r round(ci_results$r2_upper, 3)`.
+
+For the ratio $\hat{\beta}_1 / \hat{\beta}_2$, the 95% confidence interval is `r round(ci_results$ratio_lower, 3)` to `r round(ci_results$ratio_upper, 3)`.
